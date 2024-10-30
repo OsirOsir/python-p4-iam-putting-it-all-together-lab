@@ -1,116 +1,143 @@
 #!/usr/bin/env python3
 
-from flask import request, session, make_response, jsonify
+from flask import request, session, jsonify, make_response
 from flask_restful import Resource
 from sqlalchemy.exc import IntegrityError
+from werkzeug.security import generate_password_hash, check_password_hash
 
 from config import app, db, api
 from models import User, Recipe
 
 class Signup(Resource):
-
     def post(self):
-        data = request.json
-        username = data.get('username')
-        password = data.get('password')
-        image_url = data.get('image_url')
-        bio = data.get('bio')
-
+        json = request.get_json()
+        
         errors = {}
-        existing_user = User.query.filter(User.username == username).first()
-        if existing_user or not username:
-            errors['username'] = 'Username is required or username exists'
-        if not password:
+        if 'username' not in json or not json['username']:
+            errors['username'] = 'Username is required.'
+        if 'password' not in json or not json['password']:
             errors['password'] = 'Password is required.'
+
         if errors:
-            return make_response(jsonify({"errors": errors}), 422)
-        user = User(
-            username = username,
-            image_url = image_url,
-            bio = bio
-        )
-        user.password_hash = password
+            return make_response({"errors": errors}, 422)
+        
+        hashed_password = generate_password_hash(json['password'])
+        
+        
+        user = User(username=json['username'])
+        user.password_hash = hashed_password
+        user.image_url = json.get('image_url', '')
+        user.bio = json.get('bio', '')
+        
         db.session.add(user)
         db.session.commit()
+        
         session['user_id'] = user.id
-
-        return make_response(jsonify(user.to_dict()), 201)
+        
+        return make_response({
+                "id": user.id,
+                "username": user.username,
+                "image_url": user.image_url,
+                "bio": user.bio
+            }, 201)
+        
 
 class CheckSession(Resource):
     def get(self):
         user_id = session.get('user_id')
-        if not user_id:
-            return make_response(jsonify({"error": "Unauthorized"}), 401)
-        user = User.query.filter(User.id == user_id).first()
-        if user:
-            return make_response(jsonify(user.to_dict()), 200)
-        else:
-            return make_response(jsonify({"error": "Unauthorized"}), 401)
+        
+        if user_id:
+            user = User.query.filter(User.id == user_id).first()
+            if user:
+                return make_response({
+                    "id": user.id,
+                    "username": user.username,
+                    "image_url": user.image_url,
+                    "bio": user.bio
+                }, 200)
+            
+            else:
+                return make_response({"error": "Unauthorized access"}, 401)
+        
+        return make_response({"error": "Unauthorized access"}, 401)
+            
 
 class Login(Resource):
     def post(self):
-        data = request.json
+        data = request.get_json()
         username = data.get('username')
         password = data.get('password')
+         
         user = User.query.filter(User.username == username).first()
-
-        if user and user.authenticate(password):
-            session['user_id'] = user.id
-            return make_response(jsonify(user.to_dict()), 200)
         
-        return make_response(jsonify({'error': 'Invalid username or password'}), 401)
+        if user and user.authenticate(password):
+            session['user_id'] =  user.id
+            
+            return make_response({
+                "id": user.id,
+                "username": user.username,
+                "image_url": user.image_url,
+                "bio": user.bio
+            }, 200)
+        
+        return make_response({"error": "Invalid username or password"}, 401)
+        
 
 class Logout(Resource):
     def delete(self):
-        if 'user_id' not in session or session['user_id'] is None:
-            return make_response(jsonify({'error': 'Unauthorized'}), 401)
-        session['user_id'] = None
-        return make_response(jsonify({"m):essage": "Logged out successfully"}), 200)
-
+        session.pop('user_id', None)
+        
+        return make_response({"error": "Unauthorized access"}, 401)
+    
 
 class RecipeIndex(Resource):
     def get(self):
         if not session.get('user_id'):
-            response_body = {
-                "error": "Unauthorised"
-            }
-            return make_response(jsonify(response_body), 401)
-        recipes = Recipe.query.filter_by(user_id = session.get('user_id')).all()
-        recipes_list = [recipe.to_dict() for recipe in recipes]
-        return make_response(jsonify(recipes_list), 200)
+            return make_response({"error": "Unauthorized access"}, 401)
+        
+        recipes = [{
+                "id": recipe.id,
+                "title": recipe.title,
+                "instructions": recipe.instructions,
+                "minutes_to_complete": recipe.minutes_to_complete,
+                "user_id": recipe.user_id,
+            } for recipe in Recipe.query.all()]
+
+        return make_response(recipes, 200)
     
     def post(self):
-        data = request.json
-        title = data.get('title')
-        instructions = data.get('instructions')
-        minutes_to_complete = data.get('minutes_to_complete')
-
-        errors = {}
-        if not title:
-            errors['title'] = 'Title is required.'
-        if not instructions:
-            errors['instructions'] = 'Instructions are required.'
-        if minutes_to_complete is None or not isinstance(minutes_to_complete, int) or minutes_to_complete <= 0:
-            errors['minutes_to_complete'] = 'Minutes to complete must be a positive integer.'
-        if errors:
-            return make_response(jsonify({"errors": errors}), 422)
+        if not session.get('user_id'):
+            return make_response({"error": "Unauthorized access"}, 401)
         
-        user_id = session.get('user_id')
-        if not user_id:
-            return make_response(jsonify({"errors": "Unauthorized"}), 401)
-        try:
-            recipe = Recipe(
-                title = title,
-                instructions = instructions,
-                minutes_to_complete = minutes_to_complete,
-                user_id = user_id
-            )
-            db.session.add(recipe)
-            db.session.commit()
-        except Exception as e:
-            return make_response(jsonify({"error": "Failed to create recipe"}), 422)
+        data = request.get_json()
+        
+        if 'title' not in data or 'instructions' not in data:
+            return make_response({"error": "Invalid recipe data"}, 422)
 
-        return make_response(jsonify(recipe.to_dict()), 201)
+        try:
+            new_recipe = Recipe(
+                title=data['title'],
+                instructions=data['instructions'],
+                minutes_to_complete=data.get('minutes_to_complete', 0),
+                user_id=session['user_id']
+            )
+            
+            db.session.add(new_recipe)
+            db.session.commit()
+
+            response = {
+                "id": new_recipe.id,
+                "title": new_recipe.title,
+                "instructions": new_recipe.instructions,
+                "minutes_to_complete": new_recipe.minutes_to_complete,
+                "user_id": new_recipe.user_id,
+            }
+
+            return make_response(response, 201)
+        except Exception as e:
+            return make_response({"error": str(e)}, 500)
+        
+        
 
 api.add_resource(Signup, '/signup', endpoint='signup')
 api.add_resource(CheckSession, '/check_session', endpoint='check_session')
